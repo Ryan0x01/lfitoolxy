@@ -80,7 +80,7 @@ def run_feroxbuster(urls, payloads_file, output_file='feroxbuster_combined_resul
 
 
     thread_count = get_dynamic_thread_count()
-    console.print("Using [bold yellow]%d[/bold yellow] threads for feroxbuster." % thread_count)
+    console.print(f"Using [bold yellow]{thread_count}[/bold yellow] threads for feroxbuster.")
     with concurrent.futures.ThreadPoolExecutor(max_workers=thread_count) as executor:
         futures = [executor.submit(process_url, url) for url in urls]
         concurrent.futures.wait(futures)
@@ -128,7 +128,7 @@ def test_lfi_vulnerabilities(urls, payloads_file, output_file='lfi_results.txt')
 
 
     thread_count = get_dynamic_thread_count()
-    console.print("Using [bold yellow]%d[/bold yellow] threads for LFI testing." % thread_count)
+    console.print(f"Using [bold yellow]{thread_count}[/bold yellow] threads for LFI testing.")
     with concurrent.futures.ThreadPoolExecutor(max_workers=thread_count) as executor:
         futures = [executor.submit(fetch_url, test_url) for test_url in urls_with_payloads]
         concurrent.futures.wait(futures)
@@ -138,8 +138,8 @@ def test_lfi_vulnerabilities(urls, payloads_file, output_file='lfi_results.txt')
     try:
         with open(output_file, 'w') as file:
             for result in lfi_results:
-                file.write("%s | %s | %d\n" % (result[0], result[1], result[2]))
-        console.print("LFI results saved to [bold cyan]%s[/bold cyan]" % output_file)
+                file.write(f"{result[0]} | {result[1]} | {result[2]}\n")
+        console.print(f"LFI results saved to [bold cyan]{output_file}[/bold cyan]")
     except Exception as e:
         logging.error("Error writing LFI results to file %s: %s", output_file, e)
 
@@ -149,10 +149,10 @@ def test_lfi_vulnerabilities(urls, payloads_file, output_file='lfi_results.txt')
 
 def display_dashboard(domain, urls, lfi_results):
     """Display a dashboard of results."""
-    console.print("\n[bold green]Dashboard for Domain: %s[/bold green]" % domain)
+    console.print(f"\n[bold green]Dashboard for Domain: {domain}[/bold green]")
     
     # URLs summary
-    console.print("Total URLs Found: [bold yellow]%d[/bold yellow]" % len(urls), style="bold cyan")
+    console.print(f"Total URLs Found: [bold yellow]{len(urls)}[/bold yellow]", style="bold cyan")
 
 
     # Results table
@@ -172,19 +172,19 @@ def display_dashboard(domain, urls, lfi_results):
 def process_domain_batch(domains, params_file, payloads_file):
     """Process a batch of domains."""
     for domain in domains:
-        console.print("\n[bold green]Processing Domain: %s[/bold green]" % domain)
+        console.print(f"\n[bold green]Processing Domain: {domain}[/bold green]")
         
         # Fetch and process URLs
         urls = fetch_urls(domain)
-        console.print("Found [bold yellow]%d[/bold yellow] URLs." % len(urls))
+        console.print(f"Found [bold yellow]{len(urls)}[/bold yellow] URLs.")
         
         if urls:
             # Run feroxbuster
-            console.print("Running feroxbuster with payloads from [bold cyan]%s[/bold cyan]..." % payloads_file)
+            console.print(f"Running feroxbuster with payloads from [bold cyan]{payloads_file}[/bold cyan]...")
             run_feroxbuster(urls, payloads_file)
             
             # Test for LFI vulnerabilities
-            console.print("Testing for LFI vulnerabilities...")
+            console.print(f"Testing for LFI vulnerabilities...")
             lfi_results = test_lfi_vulnerabilities(urls, payloads_file)
             
             # Display results
@@ -219,7 +219,7 @@ def main():
     for start in range(0, total_domains, batch_size):
         end = min(start + batch_size, total_domains)
         domain_batch = domains[start:end]
-        console.print("\nProcessing batch [bold yellow]%d[/bold yellow] of [bold yellow]%d[/bold yellow]" % (start // batch_size + 1, (total_domains + batch_size - 1) // batch_size))
+        console.print(f"\nProcessing batch [bold yellow]{start // batch_size + 1}[/bold yellow] of [bold yellow]{(total_domains + batch_size - 1) // batch_size}[/bold yellow]")
         process_domain_batch(domain_batch, args.params, args.payloads)
 
 
