@@ -1,227 +1,165 @@
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import requests
-import re
 import argparse
 import os
-import concurrent.futures
 import logging
-import psutil
-from rich.console import Console
-from rich.table import Table
 
 
-# Configure logging
-logging.basicConfig(filename='lfi_tool.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Setup logging
+logging.basicConfig(filename='script_output.log', level=logging.INFO, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-# Initialize the console
-console = Console()
-
-
-def get_dynamic_thread_count():
-    """Determine the optimal number of threads based on system resources."""
+# Function to run ParamSpider and fetch parameters
+def run_paramspider(domain, delay, consolidated_param_output_file):
     try:
-        cpu_count = psutil.cpu_count(logical=True)
-        cpu_usage = psutil.cpu_percent(interval=1)
-        available_memory = psutil.virtual_memory().available / (1024 * 1024)  # Available memory in MB
-
-
-        # Base thread count based on CPU count
-        base_count = min(cpu_count * 2, 50)  # Maximum 50 threads or twice the CPU count
-
-
-        # Adjust thread count based on CPU usage and available memory
-        if cpu_usage > 80:
-            return max(base_count // 2, 1)  # Reduce threads if CPU is high
-        elif available_memory < 512:
-            return max(base_count // 2, 1)  # Reduce threads if memory is low
-        else:
-            return base_count  # Use base count if resources are sufficient
-    except Exception as e:
-        logging.error("Error determining thread count: %s", e)
-        return 10  # Fallback to a default value if error occurs
-
-
-def fetch_urls(domain):
-    """Fetch URLs with waybackurls and paramspider."""
-    try:
-        # Fetch URLs with waybackurls
-        result = subprocess.run(['waybackurls', domain], capture_output=True, text=True, check=True)
-        urls = result.stdout.splitlines()
-
-
-        # Fetch URLs with paramspider
-        paramspider_output = subprocess.run(['paramspider', '-d', domain, '-l', '3', '-o', 'paramspider_output.txt'], capture_output=True, text=True, check=True)
-        with open('paramspider_output.txt', 'r') as file:
-            paramspider_urls = file.read().splitlines()
+        logging.info(f"Processing domain: {domain}")
+        cmd = f'paramspider -d {domain} -l 3'
+        result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
         
-        # Combine results and remove duplicates
-        all_urls = list(set(urls + paramspider_urls))
-        return all_urls
+        with open(consolidated_param_output_file, 'a') as f:
+            f.write(f"# Output for {domain}\n")
+            f.write(result.stdout + "\n")
+        
+        logging.info(f"ParamSpider completed for domain {domain}. Output appended to {consolidated_param_output_file}.")
     except subprocess.CalledProcessError as e:
-        logging.error("Subprocess error fetching URLs for domain %s: %s", domain, e)
-        return []
+        logging.error(f"Error invoking ParamSpider for domain {domain}: {e}")
     except Exception as e:
-        logging.error("Error fetching URLs for domain %s: %s", domain, e)
-        return []
+        logging.error(f"Unexpected error occurred: {e}")
 
 
-def run_feroxbuster(urls, payloads_file, output_file='feroxbuster_combined_results.txt'):
-    """Run feroxbuster on URLs with recursive bruteforce disabled."""
-    def process_url(url):
-        try:
-            # Run feroxbuster with recursive bruteforce disabled
-            with open(output_file, 'a') as outfile:
-                subprocess.run(['feroxbuster', '-u', url, '-w', payloads_file, '--no-recursion'], stdout=outfile, stderr=subprocess.STDOUT, check=True)
-        except subprocess.CalledProcessError as e:
-            logging.error("Feroxbuster error running on %s: %s", url, e)
-        except Exception as e:
-            logging.error("Error running feroxbuster on %s: %s", url, e)
-
-
-    thread_count = get_dynamic_thread_count()
-    console.print(f"Using [bold yellow]{thread_count}[/bold yellow] threads for feroxbuster.")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=thread_count) as executor:
-        futures = [executor.submit(process_url, url) for url in urls]
-        concurrent.futures.wait(futures)
-
-
-def test_lfi_vulnerabilities(urls, payloads_file, output_file='lfi_results.txt'):
-    """Test for LFI vulnerabilities with concurrent validation and save results."""
-    lfi_results = []
-    lfi_payloads = []
-
-
+# Function to run gf tool for filtering LFI-related parameters
+def run_gf_lfi(consolidated_param_output_file, consolidated_gf_output_file, domain):
     try:
-        with open(payloads_file, 'r') as file:
-            lfi_payloads = file.read().splitlines()
+        logging.info(f"Running gf tool on output for domain {domain} to filter for LFI parameters")
+        cmd = f'cat {consolidated_param_output_file} | gf lfi'
+        result = subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+        
+        with open(consolidated_gf_output_file, 'a') as f:
+            f.write(f"# gf Output for {domain}\n")
+            f.write(result.stdout + "\n")
+        
+        logging.info(f"gf filtering completed for domain {domain}. Output appended to {consolidated_gf_output_file}.")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Error running gf on output for domain {domain}: {e}")
     except Exception as e:
-        logging.error("Error reading payloads file %s: %s", payloads_file, e)
-        return []
+        logging.error(f"Unexpected error occurred: {e}")
 
 
-    # Define patterns and content length expectations for known sensitive files
-    known_patterns = {
-        'etc/passwd': re.compile(r'(root:|bin:|daemon:|nobody:|systemd-)[^:]*:[^:]*'),
-        'hosts': re.compile(r'127\.0\.0\.1\s+localhost'),
-    }
-
-
-    def fetch_url(test_url):
-        """Fetch URL and test for LFI vulnerabilities."""
-        try:
-            response = requests.get(test_url, timeout=10)
-            if response.status_code == 200:
-                content = response.text
-                for file_name, pattern in known_patterns.items():
-                    if pattern.search(content):
-                        if "etc/passwd" in test_url and len(content) > 100:  # Example length check
-                            lfi_results.append((test_url, file_name, len(content)))
-                        elif "hosts" in test_url:
-                            lfi_results.append((test_url, file_name, len(content)))
-        except requests.RequestException as e:
-            logging.error("Request failed for %s: %s", test_url, e)
-
-
-    # Prepare URLs with payloads
-    urls_with_payloads = [f"{url}?file={payload}" for url in urls for payload in lfi_payloads]
-
-
-    thread_count = get_dynamic_thread_count()
-    console.print(f"Using [bold yellow]{thread_count}[/bold yellow] threads for LFI testing.")
-    with concurrent.futures.ThreadPoolExecutor(max_workers=thread_count) as executor:
-        futures = [executor.submit(fetch_url, test_url) for test_url in urls_with_payloads]
-        concurrent.futures.wait(futures)
-
-
-    # Save LFI results to a file
+# Function to check for LFI vulnerabilities
+def check_lfi_vulnerabilities(domain, payloads, consolidated_gf_output_file, consolidated_lfi_output_file, delay):
     try:
-        with open(output_file, 'w') as file:
-            for result in lfi_results:
-                file.write(f"{result[0]} | {result[1]} | {result[2]}\n")
-        console.print(f"LFI results saved to [bold cyan]{output_file}[/bold cyan]")
-    except Exception as e:
-        logging.error("Error writing LFI results to file %s: %s", output_file, e)
+        with open(consolidated_gf_output_file, 'r') as file:
+            urls = file.readlines()
 
 
-    return lfi_results
+        valid_lfi_urls = []
+        for url in urls:
+            if url.startswith("#"):
+                continue
+            url = url.strip()
+            for payload in payloads:
+                test_url = url.replace("=", f"={payload}")
+                if is_valid_url(test_url) and lfi_payload_works(test_url):
+                    logging.info(f"LFI vulnerability detected with payload: {test_url}")
+                    valid_lfi_urls.append(test_url)
+                    break  # Stop after finding a valid LFI with one payload
 
 
-def display_dashboard(domain, urls, lfi_results):
-    """Display a dashboard of results."""
-    console.print(f"\n[bold green]Dashboard for Domain: {domain}[/bold green]")
+                if delay > 0:
+                    threading.sleep(delay / 1000.0)
+        
+        with open(consolidated_lfi_output_file, 'a') as lfi_file:
+            lfi_file.write(f"# LFI vulnerabilities for {domain}\n")
+            for valid_url in valid_lfi_urls:
+                lfi_file.write(valid_url + "\n")
+        
+        logging.info(f"LFI vulnerability check completed for domain {domain}. Output appended to {consolidated_lfi_output_file}.")
     
-    # URLs summary
-    console.print(f"Total URLs Found: [bold yellow]{len(urls)}[/bold yellow]", style="bold cyan")
+    except Exception as e:
+        logging.error(f"Error during LFI vulnerability check for domain {domain}: {e}")
 
 
-    # Results table
-    table = Table(title="LFI Vulnerabilities Detected")
-    table.add_column("URL", style="dim", width=60)
-    table.add_column("File", justify="right", width=20)
-    table.add_column("Content Length", justify="right", width=20)
+# Function to validate if the URL is well-formed
+def is_valid_url(url):
+    try:
+        requests.get(url)
+        return True
+    except requests.RequestException:
+        logging.error(f"Malformed URL or connection error: {url}")
+        return False
 
 
-    for result in lfi_results:
-        table.add_row(result[0], result[1], str(result[2]))
+# Function to determine if LFI payload is working
+def lfi_payload_works(url):
+    try:
+        response = requests.get(url)
+        content = response.text.lower()  # Convert to lowercase for case-insensitive comparison
 
 
-    console.print(table)
+        # Check for multiple indicators of LFI
+        linux_indicators = ["root:x:0:0", "mail:x:8:", "bin/bash", "etc/passwd"]
+        windows_indicators = ["[boot loader]", "[fonts]", "c:\\windows", "c:\\system32"]
 
 
-def process_domain_batch(domains, params_file, payloads_file):
-    """Process a batch of domains."""
-    for domain in domains:
-        console.print(f"\n[bold green]Processing Domain: {domain}[/bold green]")
-        
-        # Fetch and process URLs
-        urls = fetch_urls(domain)
-        console.print(f"Found [bold yellow]{len(urls)}[/bold yellow] URLs.")
-        
-        if urls:
-            # Run feroxbuster
-            console.print(f"Running feroxbuster with payloads from [bold cyan]{payloads_file}[/bold cyan]...")
-            run_feroxbuster(urls, payloads_file)
-            
-            # Test for LFI vulnerabilities
-            console.print(f"Testing for LFI vulnerabilities...")
-            lfi_results = test_lfi_vulnerabilities(urls, payloads_file)
-            
-            # Display results
-            display_dashboard(domain, urls, lfi_results)
-        else:
-            console.print("No URLs found for the domain.")
+        # Look for common LFI indicators in the response body
+        if any(indicator in content for indicator in linux_indicators + windows_indicators):
+            return True
 
 
-def main():
-    parser = argparse.ArgumentParser(description="LFI Detection Tool")
-    parser.add_argument('-d', '--domain-file', required=True, help="File containing a list of domains")
-    parser.add_argument('-p', '--params', required=True, help="File with parameters")
-    parser.add_argument('-f', '--payloads', required=True, help="File with payloads")
-    parser.add_argument('--batch-size', type=int, default=100, help="Number of domains to process per batch")
+        # Further checks (e.g., content-length analysis, specific HTTP headers)
+        # Example: Check for a significant difference in response size
+        if len(content) > 10000:  # Arbitrary threshold, tweak as needed
+            return True
 
 
+        return False
+
+
+    except requests.RequestException as e:
+        logging.error(f"Error fetching webpage content for {url}: {e}")
+        return False
+
+
+# Main script logic
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="LFI Vulnerability Checker with ParamSpider and gf")
+    parser.add_argument("-i", "--input", required=True, help="Input file path containing list of domains")
+    parser.add_argument("-d", "--delay", type=int, default=0, help="Delay time in milliseconds")
+    parser.add_argument("-t", "--threads", type=int, default=5, help="Number of threads for concurrent processing")
+    parser.add_argument("-p", "--payloads", required=True, help="File containing list of LFI payloads")
+    parser.add_argument("-o", "--output", default="output", help="Directory to save output files")
+    
     args = parser.parse_args()
 
 
-    # Read domains from file
-    try:
-        with open(args.domain_file, 'r') as file:
-            domains = file.read().splitlines()
-    except Exception as e:
-        logging.error("Error reading domain file %s: %s", args.domain_file, e)
-        return
+    # Ensure output directory exists
+    os.makedirs(args.output, exist_ok=True)
 
 
-    # Process domains in batches
-    total_domains = len(domains)
-    batch_size = args.batch_size
-    for start in range(0, total_domains, batch_size):
-        end = min(start + batch_size, total_domains)
-        domain_batch = domains[start:end]
-        console.print(f"\nProcessing batch [bold yellow]{start // batch_size + 1}[/bold yellow] of [bold yellow]{(total_domains + batch_size - 1) // batch_size}[/bold yellow]")
-        process_domain_batch(domain_batch, args.params, args.payloads)
+    # Consolidated output files
+    consolidated_param_output_file = os.path.join(args.output, 'consolidated_paramspider_output.txt')
+    consolidated_gf_output_file = os.path.join(args.output, 'consolidated_gf_output.txt')
+    consolidated_lfi_output_file = os.path.join(args.output, 'consolidated_lfi_output.txt')
 
 
-if __name__ == "__main__":
-    main()
+    # Read domains from input file
+    with open(args.input, 'r') as f:
+        domains = [line.strip() for line in f.readlines()]
+
+
+    # Read LFI payloads from file
+    with open(args.payloads, 'r') as f:
+        lfi_payloads = [line.strip() for line in f.readlines()]
+
+
+    # Use multithreading to process domains concurrently
+    with ThreadPoolExecutor(max_workers=args.threads) as executor:
+        for domain in domains:
+            executor.submit(run_paramspider, domain, args.delay, consolidated_param_output_file)
+            executor.submit(run_gf_lfi, consolidated_param_output_file, consolidated_gf_output_file, domain)
+            executor.submit(check_lfi_vulnerabilities, domain, lfi_payloads, consolidated_gf_output_file, consolidated_lfi_output_file, args.delay)
+    
+    logging.info("Script execution completed.")
